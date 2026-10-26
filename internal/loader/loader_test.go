@@ -181,6 +181,59 @@ func TestTotalByteBudget(t *testing.T) {
 	}
 }
 
+func countNodes(n *model.Node) int {
+	total := 0
+	for _, c := range n.Children {
+		total += 1 + countNodes(c)
+	}
+	return total
+}
+
+func TestExpansionBudgetBoundsCachedSplices(t *testing.T) {
+	old := maxNodes
+	defer func() { maxNodes = old }()
+	maxNodes = 200 // tiny expansion budget
+
+	dir := t.TempDir()
+	// A small cached file: 10 directives. Reads once, but splicing it 500
+	// times would materialize ~5000 nodes without a splice-charged budget.
+	if err := os.WriteFile(filepath.Join(dir, "snippet.conf"),
+		[]byte(strings.Repeat("map_hash_bucket_size 128;\n", 10)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	b.WriteString("http {\n")
+	for i := 0; i < 500; i++ {
+		b.WriteString("  include snippet.conf;\n")
+	}
+	b.WriteString("}\n")
+	top := filepath.Join(dir, "nginx.conf")
+	if err := os.WriteFile(top, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := Load(top, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.FilesRead != 2 {
+		t.Fatalf("expected file read once (top + snippet), got %d", r.FilesRead)
+	}
+	nodes := countNodes(r.Root)
+	if nodes > maxNodes+50 {
+		t.Fatalf("expansion not bounded: %d nodes materialized (budget %d)", nodes, maxNodes)
+	}
+	var truncNote bool
+	for _, n := range r.Notes {
+		if strings.Contains(n, "node budget") {
+			truncNote = true
+		}
+	}
+	if !truncNote {
+		t.Fatalf("expected a node-budget truncation note, got %v", r.Notes)
+	}
+}
+
 func TestFileSizeCap(t *testing.T) {
 	dir := t.TempDir()
 	big := filepath.Join(dir, "big.conf")

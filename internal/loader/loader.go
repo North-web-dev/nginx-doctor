@@ -26,7 +26,13 @@ const (
 	maxTotalFiles   = 2000
 )
 
-var maxTotalBytes = 128 << 20 // 128 MiB read across the whole load
+var (
+	maxTotalBytes = 128 << 20 // 128 MiB read across the whole load
+	// maxNodes bounds the total directives materialized in the expanded tree.
+	// It is charged on every splice, cache hit or miss, so a small cached file
+	// included many times cannot amplify the tree without limit.
+	maxNodes = 5_000_000
+)
 
 // Options controls how a config is loaded.
 type Options struct {
@@ -58,6 +64,8 @@ type loader struct {
 	notes      []string
 	fileCount  int
 	totalBytes int
+	nodeCount  int
+	truncated  bool
 	visiting   map[string]bool
 	// cache maps an absolute include path to its parsed top-level directives,
 	// so a file included more than once is read and parsed exactly once.
@@ -124,10 +132,18 @@ func Load(path string, opts Options) (*Result, error) {
 func (l *loader) build(dirs []config.IDirective, parent *model.Node, curFile, curDir string, depth int) []*model.Node {
 	var out []*model.Node
 	for _, d := range dirs {
+		if l.nodeCount >= maxNodes {
+			if !l.truncated {
+				l.truncated = true
+				l.note("include expansion stopped: node budget (%d) exceeded; the analyzed tree is truncated", maxNodes)
+			}
+			break
+		}
 		if d.GetName() == "include" {
 			out = append(out, l.expandInclude(d, parent, curFile, curDir, depth)...)
 			continue
 		}
+		l.nodeCount++
 		n := &model.Node{
 			Name:   d.GetName(),
 			Args:   paramsOf(d),
