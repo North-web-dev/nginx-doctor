@@ -270,12 +270,31 @@ func fmtName(i int) string {
 	return "s" + string(rune('0'+i/10)) + string(rune('0'+i%10)) + ".conf"
 }
 
+func TestParseErrorIncludeFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	// Unbalanced brace: a parse error in a file nginx would load.
+	if err := os.WriteFile(filepath.Join(dir, "broken.conf"), []byte("server { listen 80;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	top := filepath.Join(dir, "nginx.conf")
+	if err := os.WriteFile(top, []byte("http { include broken.conf; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Load(top, Options{})
+	if !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("a parse error in an include must fail closed, got %v", err)
+	}
+	if r == nil || !r.Incomplete {
+		t.Fatal("expected a partial result flagged Incomplete")
+	}
+}
+
 func TestFileSizeCap(t *testing.T) {
 	dir := t.TempDir()
 	big := filepath.Join(dir, "big.conf")
 	// one directive plus padding past the cap
 	data := []byte("http {}\n")
-	pad := make([]byte, maxFileSize+10)
+	pad := make([]byte, MaxFileSize+10)
 	for i := range pad {
 		pad[i] = ' '
 	}

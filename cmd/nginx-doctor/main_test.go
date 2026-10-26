@@ -122,6 +122,81 @@ func TestIncompleteFailsClosed(t *testing.T) {
 	}
 }
 
+func runIncomplete(t *testing.T, dir, top string) (int, string) {
+	t.Helper()
+	var out, errb bytes.Buffer
+	code := run([]string{"--no-color", top}, &out, &errb, false)
+	return code, out.String() + errb.String()
+}
+
+func TestDepthLimitFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	// A chain longer than the include-depth limit.
+	for i := 0; i < 40; i++ {
+		body := "include a" + itoa(i+1) + ".conf;\n"
+		if err := os.WriteFile(filepath.Join(dir, "a"+itoa(i)+".conf"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.WriteFile(filepath.Join(dir, "a40.conf"), []byte("server { listen 80; }\n"), 0o644)
+	top := filepath.Join(dir, "nginx.conf")
+	if err := os.WriteFile(top, []byte("http { include a0.conf; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, combined := runIncomplete(t, dir, top)
+	if code != 2 || !strings.Contains(strings.ToLower(combined), "incomplete") {
+		t.Fatalf("too-deep include must exit 2 + incomplete; code=%d\n%s", code, combined)
+	}
+}
+
+func TestOversizeIncludeFailsClosed(t *testing.T) {
+	old := loader.MaxFileSize
+	defer func() { loader.MaxFileSize = old }()
+	loader.MaxFileSize = 128
+
+	dir := t.TempDir()
+	big := strings.Repeat("# padding padding padding\n", 50) // > 128 bytes
+	if err := os.WriteFile(filepath.Join(dir, "big.conf"), []byte(big), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	top := filepath.Join(dir, "nginx.conf")
+	if err := os.WriteFile(top, []byte("http{include big.conf;}\n"), 0o644); err != nil { // < 128 bytes
+		t.Fatal(err)
+	}
+	code, combined := runIncomplete(t, dir, top)
+	if code != 2 || !strings.Contains(strings.ToLower(combined), "incomplete") {
+		t.Fatalf("oversize include must exit 2 + incomplete; code=%d\n%s", code, combined)
+	}
+}
+
+func TestUnreadableIncludeFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	// A broken symlink the glob matches but cannot be stat'd/read.
+	if err := os.Symlink(filepath.Join(dir, "does-not-exist"), filepath.Join(dir, "broken.conf")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	top := filepath.Join(dir, "nginx.conf")
+	if err := os.WriteFile(top, []byte("http { include broken.conf; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, combined := runIncomplete(t, dir, top)
+	if code != 2 || !strings.Contains(strings.ToLower(combined), "incomplete") {
+		t.Fatalf("unreadable include must exit 2 + incomplete; code=%d\n%s", code, combined)
+	}
+}
+
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	var b []byte
+	for i > 0 {
+		b = append([]byte{byte('0' + i%10)}, b...)
+		i /= 10
+	}
+	return string(b)
+}
+
 func TestHelp(t *testing.T) {
 	var out, errb bytes.Buffer
 	code := run([]string{"--help"}, &out, &errb, false)

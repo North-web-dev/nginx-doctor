@@ -21,21 +21,26 @@ import (
 
 // Limits bound include resolution.
 const (
-	maxFileSize     = 16 << 20 // 16 MiB per file
 	maxIncludeDepth = 32
 	maxTotalFiles   = 2000
 	maxOps          = 1_000_000 // include directives + matched files processed
 	maxNotes        = 500       // cap the notes slice so it cannot balloon
 )
 
-// MaxTotalBytes and MaxNodes are vars so tests can lower them; they are never
-// mutated at runtime. MaxNodes bounds the total directives materialized in the
-// expanded tree and is charged on every splice, cache hit or miss, so a small
-// cached file included many times cannot amplify the tree without limit.
+// MaxFileSize, MaxTotalBytes, and MaxNodes are vars so tests can lower them;
+// they are never mutated at runtime. MaxNodes bounds the total directives
+// materialized in the expanded tree and is charged on every splice, cache hit
+// or miss, so a small cached file included many times cannot amplify the tree
+// without limit.
 var (
+	MaxFileSize   = 16 << 20  // 16 MiB per file
 	MaxTotalBytes = 128 << 20 // 128 MiB read across the whole load
 	MaxNodes      = 5_000_000
 )
+
+// errFileTooLarge is the sentinel readCapped returns when a file exceeds the
+// per-file size cap, so callers can treat it as content they could not load.
+var errFileTooLarge = errors.New("file exceeds the per-file size cap")
 
 // ErrIncomplete is returned by Load when resource limits forced include
 // expansion to stop before the config was fully resolved. The Result is still
@@ -98,12 +103,12 @@ func Load(path string, opts Options) (*Result, error) {
 	)
 
 	if path == "-" {
-		b, err := io.ReadAll(io.LimitReader(os.Stdin, maxFileSize+1))
+		b, err := io.ReadAll(io.LimitReader(os.Stdin, int64(MaxFileSize)+1))
 		if err != nil {
 			return nil, fmt.Errorf("reading stdin: %w", err)
 		}
-		if len(b) > maxFileSize {
-			return nil, fmt.Errorf("stdin config exceeds %d bytes", maxFileSize)
+		if len(b) > MaxFileSize {
+			return nil, fmt.Errorf("stdin config exceeds %d bytes", MaxFileSize)
 		}
 		src = string(b)
 		cwd, _ := os.Getwd()
@@ -150,11 +155,15 @@ func Load(path string, opts Options) (*Result, error) {
 func (l *loader) build(dirs []config.IDirective, parent *model.Node, curFile, curDir string, depth int) []*model.Node {
 	var out []*model.Node
 	for _, d := range dirs {
+		// Hard node ceiling, checked before materializing EVERY directive, so
+		// an adversarial config cannot run the tree past the cap. Hitting it
+		// fails closed (ErrIncomplete + exit 2); in realistic configs the cap
+		// is never approached, so no legitimate directive is dropped.
+		if l.nodeCount >= MaxNodes {
+			l.markTruncated()
+			break
+		}
 		if d.GetName() == "include" {
-			// Budget gates include expansion only; directives that are already
-			// in hand (the top-level file and any file we have begun parsing)
-			// are always kept and analyzed, so we fail closed on amplification
-			// without blinding the analysis to what we can see.
 			if l.budgetExceeded() {
 				l.markTruncated()
 				continue
@@ -190,7 +199,8 @@ func (l *loader) expandInclude(d config.IDirective, parent *model.Node, curFile,
 		return nil
 	}
 	if depth >= maxIncludeDepth {
-		l.note("include %q at %s:%d skipped: max include depth (%d) reached", model.Clean(target), curFile, d.GetLine(), maxIncludeDepth)
+		l.note("include %q at %s:%d skipped: max include depth (%d) reached; analysis is INCOMPLETE", model.Clean(target), curFile, d.GetLine(), maxIncludeDepth)
+		l.truncated = true
 		return nil
 	}
 
@@ -226,7 +236,14 @@ func (l *loader) expandInclude(d config.IDirective, parent *model.Node, curFile,
 			continue
 		}
 		info, err := os.Stat(abs)
-		if err != nil || info.IsDir() {
+		if err != nil {
+			// A file the glob matched but we cannot stat is content nginx would
+			// have tried to load; fail closed rather than silently drop it.
+			l.note("include %q skipped: %v; analysis is INCOMPLETE", model.Clean(m), err)
+			l.truncated = true
+			continue
+		}
+		if info.IsDir() {
 			continue
 		}
 		if !l.opts.AllowExternalIncludes && !withinSandbox(l.sandbox, abs) {
@@ -247,7 +264,10 @@ func (l *loader) expandInclude(d config.IDirective, parent *model.Node, curFile,
 			}
 			src, err := readCapped(abs)
 			if err != nil {
-				l.note("include %q skipped: %v", model.Clean(m), err)
+				// Includes we cannot read (size cap, permissions, I/O) are
+				// content nginx would load; fail closed.
+				l.note("include %q skipped: %v; analysis is INCOMPLETE", model.Clean(m), err)
+				l.truncated = true
 				continue
 			}
 			if l.totalBytes+len(src) > MaxTotalBytes {
@@ -259,7 +279,8 @@ func (l *loader) expandInclude(d config.IDirective, parent *model.Node, curFile,
 			l.fileCount++
 			parsed, err := parseString(src)
 			if err != nil {
-				l.note("include %q skipped: parse error: %v", model.Clean(m), err)
+				l.note("include %q skipped: parse error: %v; analysis is INCOMPLETE", model.Clean(m), err)
+				l.truncated = true
 				continue
 			}
 			dirs = parsed
@@ -333,12 +354,12 @@ func readCapped(path string) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, maxFileSize+1))
+	b, err := io.ReadAll(io.LimitReader(f, int64(MaxFileSize)+1))
 	if err != nil {
 		return "", err
 	}
-	if len(b) > maxFileSize {
-		return "", fmt.Errorf("file %s exceeds %d bytes", path, maxFileSize)
+	if len(b) > MaxFileSize {
+		return "", fmt.Errorf("%s (%d bytes): %w", path, len(b), errFileTooLarge)
 	}
 	return string(b), nil
 }
