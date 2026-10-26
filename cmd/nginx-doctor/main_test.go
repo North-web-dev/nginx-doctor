@@ -2,8 +2,12 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/North-web-dev/nginx-doctor/internal/loader"
 )
 
 func TestExitCleanIsZero(t *testing.T) {
@@ -83,6 +87,38 @@ func TestErrorOutputSanitized(t *testing.T) {
 	}
 	if bytes.ContainsRune(errb.Bytes(), 0x1b) {
 		t.Fatalf("error output contains ESC byte: %q", errb.String())
+	}
+}
+
+func TestIncompleteFailsClosed(t *testing.T) {
+	old := loader.MaxNodes
+	defer func() { loader.MaxNodes = old }()
+	loader.MaxNodes = 20
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "snippet.conf"),
+		[]byte("server { listen 80; server_name a.test; root /srv; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	b.WriteString("http {\n")
+	for i := 0; i < 300; i++ {
+		b.WriteString("  include snippet.conf;\n")
+	}
+	b.WriteString("}\n")
+	top := filepath.Join(dir, "nginx.conf")
+	if err := os.WriteFile(top, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errb bytes.Buffer
+	code := run([]string{"--no-color", top}, &out, &errb, false)
+	if code != 2 {
+		t.Fatalf("a truncated analysis must exit 2, got %d", code)
+	}
+	combined := out.String() + errb.String()
+	if !strings.Contains(strings.ToLower(combined), "incomplete") {
+		t.Fatalf("output must state the analysis is incomplete, got:\n%s", combined)
 	}
 }
 

@@ -6,6 +6,7 @@
 package loader
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,21 +19,29 @@ import (
 	"github.com/tufanbarisyildirim/gonginx/parser"
 )
 
-// Limits bound include resolution. maxTotalBytes is a var so tests can lower
-// it; it is never mutated at runtime.
+// Limits bound include resolution.
 const (
 	maxFileSize     = 16 << 20 // 16 MiB per file
 	maxIncludeDepth = 32
 	maxTotalFiles   = 2000
+	maxOps          = 1_000_000 // include directives + matched files processed
+	maxNotes        = 500       // cap the notes slice so it cannot balloon
 )
 
+// MaxTotalBytes and MaxNodes are vars so tests can lower them; they are never
+// mutated at runtime. MaxNodes bounds the total directives materialized in the
+// expanded tree and is charged on every splice, cache hit or miss, so a small
+// cached file included many times cannot amplify the tree without limit.
 var (
-	maxTotalBytes = 128 << 20 // 128 MiB read across the whole load
-	// maxNodes bounds the total directives materialized in the expanded tree.
-	// It is charged on every splice, cache hit or miss, so a small cached file
-	// included many times cannot amplify the tree without limit.
-	maxNodes = 5_000_000
+	MaxTotalBytes = 128 << 20 // 128 MiB read across the whole load
+	MaxNodes      = 5_000_000
 )
+
+// ErrIncomplete is returned by Load when resource limits forced include
+// expansion to stop before the config was fully resolved. The Result is still
+// returned (with whatever was analyzed), but callers must treat the analysis
+// as untrustworthy and fail closed rather than report a clean bill of health.
+var ErrIncomplete = errors.New("analysis incomplete: include expansion hit a resource limit; results are partial")
 
 // Options controls how a config is loaded.
 type Options struct {
@@ -56,17 +65,22 @@ type Result struct {
 	// FilesRead counts distinct files read from disk (the top config plus each
 	// unique resolved include). A file included many times is read once.
 	FilesRead int
+	// Incomplete is true when a resource limit stopped include expansion before
+	// the config was fully resolved (see ErrIncomplete).
+	Incomplete bool
 }
 
 type loader struct {
-	opts       Options
-	sandbox    string // absolute allowed root directory
-	notes      []string
-	fileCount  int
-	totalBytes int
-	nodeCount  int
-	truncated  bool
-	visiting   map[string]bool
+	opts           Options
+	sandbox        string // absolute allowed root directory
+	notes          []string
+	fileCount      int
+	totalBytes     int
+	nodeCount      int
+	ops            int
+	truncated      bool
+	notesTruncated bool
+	visiting       map[string]bool
 	// cache maps an absolute include path to its parsed top-level directives,
 	// so a file included more than once is read and parsed exactly once.
 	cache map[string][]config.IDirective
@@ -126,20 +140,25 @@ func Load(path string, opts Options) (*Result, error) {
 	root.Children = l.build(dirs, root, dispPath, baseDir, 0)
 
 	sort.Strings(l.notes)
-	return &Result{Path: dispPath, Root: root, Notes: dedup(l.notes), FilesRead: l.fileCount}, nil
+	res := &Result{Path: dispPath, Root: root, Notes: dedup(l.notes), FilesRead: l.fileCount, Incomplete: l.truncated}
+	if l.truncated {
+		return res, ErrIncomplete
+	}
+	return res, nil
 }
 
 func (l *loader) build(dirs []config.IDirective, parent *model.Node, curFile, curDir string, depth int) []*model.Node {
 	var out []*model.Node
 	for _, d := range dirs {
-		if l.nodeCount >= maxNodes {
-			if !l.truncated {
-				l.truncated = true
-				l.note("include expansion stopped: node budget (%d) exceeded; the analyzed tree is truncated", maxNodes)
-			}
-			break
-		}
 		if d.GetName() == "include" {
+			// Budget gates include expansion only; directives that are already
+			// in hand (the top-level file and any file we have begun parsing)
+			// are always kept and analyzed, so we fail closed on amplification
+			// without blinding the analysis to what we can see.
+			if l.budgetExceeded() {
+				l.markTruncated()
+				continue
+			}
 			out = append(out, l.expandInclude(d, parent, curFile, curDir, depth)...)
 			continue
 		}
@@ -160,6 +179,7 @@ func (l *loader) build(dirs []config.IDirective, parent *model.Node, curFile, cu
 }
 
 func (l *loader) expandInclude(d config.IDirective, parent *model.Node, curFile, curDir string, depth int) []*model.Node {
+	l.ops++
 	target := includePath(d)
 	if target == "" {
 		l.note("include with no path at %s:%d skipped", curFile, d.GetLine())
@@ -192,6 +212,14 @@ func (l *loader) expandInclude(d config.IDirective, parent *model.Node, curFile,
 
 	var out []*model.Node
 	for _, m := range matches {
+		// Charge every matched file, cache hit or miss, so a glob matching a
+		// huge number of files (or a file spliced many times) cannot defeat
+		// the budget by producing few or no new nodes per splice.
+		l.ops++
+		if l.budgetExceeded() {
+			l.markTruncated()
+			break
+		}
 		abs, err := filepath.Abs(filepath.Clean(m))
 		if err != nil {
 			l.note("include target %q skipped: %v", model.Clean(m), err)
@@ -213,7 +241,8 @@ func (l *loader) expandInclude(d config.IDirective, parent *model.Node, curFile,
 		dirs, cached := l.cache[abs]
 		if !cached {
 			if l.fileCount >= maxTotalFiles {
-				l.note("include processing stopped: max file count (%d) reached", maxTotalFiles)
+				l.note("include processing stopped: max file count (%d) reached; analysis is INCOMPLETE", maxTotalFiles)
+				l.truncated = true
 				break
 			}
 			src, err := readCapped(abs)
@@ -221,8 +250,9 @@ func (l *loader) expandInclude(d config.IDirective, parent *model.Node, curFile,
 				l.note("include %q skipped: %v", model.Clean(m), err)
 				continue
 			}
-			if l.totalBytes+len(src) > maxTotalBytes {
-				l.note("include processing stopped: total read budget (%d bytes) exceeded", maxTotalBytes)
+			if l.totalBytes+len(src) > MaxTotalBytes {
+				l.note("include processing stopped: total read budget (%d bytes) exceeded; analysis is INCOMPLETE", MaxTotalBytes)
+				l.truncated = true
 				break
 			}
 			l.totalBytes += len(src)
@@ -245,7 +275,25 @@ func (l *loader) expandInclude(d config.IDirective, parent *model.Node, curFile,
 }
 
 func (l *loader) note(format string, a ...any) {
+	if len(l.notes) >= maxNotes {
+		if !l.notesTruncated {
+			l.notesTruncated = true
+			l.notes = append(l.notes, fmt.Sprintf("further loading notes suppressed (reached %d)", maxNotes))
+		}
+		return
+	}
 	l.notes = append(l.notes, fmt.Sprintf(format, a...))
+}
+
+func (l *loader) budgetExceeded() bool {
+	return l.nodeCount >= MaxNodes || l.ops >= maxOps
+}
+
+func (l *loader) markTruncated() {
+	if !l.truncated {
+		l.truncated = true
+		l.note("include expansion stopped: resource budget exceeded; analysis is INCOMPLETE")
+	}
 }
 
 func parseString(src string) ([]config.IDirective, error) {

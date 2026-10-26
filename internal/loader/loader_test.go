@@ -1,6 +1,7 @@
 package loader
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,9 +151,9 @@ func TestIncludedFileReadOnce(t *testing.T) {
 }
 
 func TestTotalByteBudget(t *testing.T) {
-	old := maxTotalBytes
-	defer func() { maxTotalBytes = old }()
-	maxTotalBytes = 4096 // tiny budget
+	old := MaxTotalBytes
+	defer func() { MaxTotalBytes = old }()
+	MaxTotalBytes = 4096 // tiny budget
 
 	dir := t.TempDir()
 	payload := "server { listen 80; server_name b.test; }\n" + strings.Repeat("# pad\n", 400)
@@ -167,8 +168,11 @@ func TestTotalByteBudget(t *testing.T) {
 	}
 
 	r, err := Load(top, Options{})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("hitting the byte budget must fail closed with ErrIncomplete, got %v", err)
+	}
+	if r == nil || !r.Incomplete {
+		t.Fatal("expected a partial result flagged Incomplete")
 	}
 	var budgetNote bool
 	for _, n := range r.Notes {
@@ -190,9 +194,9 @@ func countNodes(n *model.Node) int {
 }
 
 func TestExpansionBudgetBoundsCachedSplices(t *testing.T) {
-	old := maxNodes
-	defer func() { maxNodes = old }()
-	maxNodes = 200 // tiny expansion budget
+	old := MaxNodes
+	defer func() { MaxNodes = old }()
+	MaxNodes = 200 // tiny expansion budget
 
 	dir := t.TempDir()
 	// A small cached file: 10 directives. Reads once, but splicing it 500
@@ -213,25 +217,57 @@ func TestExpansionBudgetBoundsCachedSplices(t *testing.T) {
 	}
 
 	r, err := Load(top, Options{})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("blowing the node budget must fail closed with ErrIncomplete, got %v", err)
+	}
+	if r == nil || !r.Incomplete {
+		t.Fatal("expected a partial result flagged Incomplete")
 	}
 	if r.FilesRead != 2 {
 		t.Fatalf("expected file read once (top + snippet), got %d", r.FilesRead)
 	}
 	nodes := countNodes(r.Root)
-	if nodes > maxNodes+50 {
-		t.Fatalf("expansion not bounded: %d nodes materialized (budget %d)", nodes, maxNodes)
+	if nodes > MaxNodes+50 {
+		t.Fatalf("expansion not bounded: %d nodes materialized (budget %d)", nodes, MaxNodes)
 	}
-	var truncNote bool
-	for _, n := range r.Notes {
-		if strings.Contains(n, "node budget") {
-			truncNote = true
+}
+
+func TestExpandIncludeChargesPerMatchedFile(t *testing.T) {
+	old := MaxNodes
+	defer func() { MaxNodes = old }()
+	// Budget below the number of matched files: each matched file must be
+	// charged even though the snippets create no new nodes once we stop, so
+	// a glob matching many files cannot run unbounded.
+	MaxNodes = 5
+
+	dir := t.TempDir()
+	cd := filepath.Join(dir, "conf.d")
+	if err := os.Mkdir(cd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100; i++ {
+		name := filepath.Join(cd, fmtName(i))
+		if err := os.WriteFile(name, []byte("server { listen 80; }\n"), 0o644); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if !truncNote {
-		t.Fatalf("expected a node-budget truncation note, got %v", r.Notes)
+	top := filepath.Join(dir, "nginx.conf")
+	if err := os.WriteFile(top, []byte("http {\n include conf.d/*.conf;\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
+
+	r, err := Load(top, Options{})
+	if !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("expected ErrIncomplete once the budget is hit mid-glob, got %v", err)
+	}
+	// Far fewer than 100 files should have been read before the budget tripped.
+	if r.FilesRead > 20 {
+		t.Fatalf("expected the glob to stop early, read %d files", r.FilesRead)
+	}
+}
+
+func fmtName(i int) string {
+	return "s" + string(rune('0'+i/10)) + string(rune('0'+i%10)) + ".conf"
 }
 
 func TestFileSizeCap(t *testing.T) {

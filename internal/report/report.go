@@ -25,14 +25,19 @@ type Summary struct {
 
 // Report is the full result for one analyzed config.
 type Report struct {
-	Path     string          `json:"path"`
-	Findings []model.Finding `json:"findings"`
-	Notes    []string        `json:"notes,omitempty"`
-	Summary  Summary         `json:"summary"`
+	Path string `json:"path"`
+	// Incomplete is true when the loader could not fully resolve the config
+	// (a resource limit was hit). The findings are then partial and must not
+	// be read as a clean result.
+	Incomplete bool            `json:"incomplete"`
+	Findings   []model.Finding `json:"findings"`
+	Notes      []string        `json:"notes,omitempty"`
+	Summary    Summary         `json:"summary"`
 }
 
-// Build assembles a report from findings and loader notes.
-func Build(path string, findings []model.Finding, notes []string) Report {
+// Build assembles a report from findings and loader notes. incomplete marks a
+// run where resource limits stopped include resolution early.
+func Build(path string, findings []model.Finding, notes []string, incomplete bool) Report {
 	var s Summary
 	for _, f := range findings {
 		switch f.Severity {
@@ -51,7 +56,7 @@ func Build(path string, findings []model.Finding, notes []string) Report {
 	for i, n := range notes {
 		clean[i] = model.Clean(n)
 	}
-	return Report{Path: model.Clean(path), Findings: findings, Notes: clean, Summary: s}
+	return Report{Path: model.Clean(path), Incomplete: incomplete, Findings: findings, Notes: clean, Summary: s}
 }
 
 func grade(fail, warn int) int {
@@ -113,6 +118,11 @@ func cleanFindings(in []model.Finding) []model.Finding {
 func (r Report) WriteText(w io.Writer, threshold model.Severity, color bool) {
 	fmt.Fprintf(w, "nginx-doctor — %s\n", r.Path)
 
+	if r.Incomplete {
+		fmt.Fprintln(w, "\n*** ANALYSIS INCOMPLETE: include resolution hit a resource limit; the")
+		fmt.Fprintln(w, "*** findings below are PARTIAL and must not be read as a clean result. ***")
+	}
+
 	if len(r.Notes) > 0 {
 		fmt.Fprintln(w, "\nconfig loading")
 		for _, n := range r.Notes {
@@ -151,6 +161,9 @@ func (r Report) WriteText(w io.Writer, threshold model.Severity, color bool) {
 	s := r.Summary
 	fmt.Fprintf(w, "\nsummary: %d FAIL, %d WARN, %d PASS  —  score %d/100, grade %s\n",
 		s.Fail, s.Warn, s.Pass, s.Score, s.Grade)
+	if r.Incomplete {
+		fmt.Fprintln(w, "status: INCOMPLETE — analysis did not finish; treat results as unreliable")
+	}
 }
 
 func groupByScope(fs []model.Finding, threshold model.Severity) (map[string][]model.Finding, []string) {

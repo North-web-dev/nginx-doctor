@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -90,17 +91,21 @@ func run(args []string, stdout, stderr io.Writer, interactive bool) int {
 		NoInclude:             cfg.noInclude,
 		AllowExternalIncludes: cfg.allowExt,
 	})
-	if err != nil {
+	// A hard load error (unreadable or unparseable top config) yields no
+	// result. ErrIncomplete still returns a partial result, which we report
+	// and then fail closed on below.
+	if err != nil && res == nil {
 		errln(stderr, err)
 		return 2
 	}
+	incomplete := errors.Is(err, loader.ErrIncomplete)
 
 	findings := rules.Analyze(res.Root, rules.Options{Categories: cfg.only})
-	rep := report.Build(res.Path, findings, res.Notes)
+	rep := report.Build(res.Path, findings, res.Notes, incomplete)
 
 	if cfg.json {
-		if err := rep.WriteJSON(stdout); err != nil {
-			errln(stderr, err)
+		if jerr := rep.WriteJSON(stdout); jerr != nil {
+			errln(stderr, jerr)
 			return 2
 		}
 	} else {
@@ -111,6 +116,10 @@ func run(args []string, stdout, stderr io.Writer, interactive bool) int {
 		}
 	}
 
+	if incomplete {
+		errln(stderr, loader.ErrIncomplete)
+		return 2
+	}
 	return rep.ExitCode()
 }
 
