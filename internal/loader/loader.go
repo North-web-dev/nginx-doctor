@@ -18,12 +18,15 @@ import (
 	"github.com/tufanbarisyildirim/gonginx/parser"
 )
 
-// Limits bound include resolution.
+// Limits bound include resolution. maxTotalBytes is a var so tests can lower
+// it; it is never mutated at runtime.
 const (
 	maxFileSize     = 16 << 20 // 16 MiB per file
 	maxIncludeDepth = 32
 	maxTotalFiles   = 2000
 )
+
+var maxTotalBytes = 128 << 20 // 128 MiB read across the whole load
 
 // Options controls how a config is loaded.
 type Options struct {
@@ -44,19 +47,26 @@ type Result struct {
 	// Notes records include-resolution issues (skipped, unreadable, empty
 	// globs, limits hit) that are surfaced to the user rather than hidden.
 	Notes []string
+	// FilesRead counts distinct files read from disk (the top config plus each
+	// unique resolved include). A file included many times is read once.
+	FilesRead int
 }
 
 type loader struct {
-	opts      Options
-	sandbox   string // absolute allowed root directory
-	notes     []string
-	fileCount int
-	visiting  map[string]bool
+	opts       Options
+	sandbox    string // absolute allowed root directory
+	notes      []string
+	fileCount  int
+	totalBytes int
+	visiting   map[string]bool
+	// cache maps an absolute include path to its parsed top-level directives,
+	// so a file included more than once is read and parsed exactly once.
+	cache map[string][]config.IDirective
 }
 
 // Load reads path (or stdin when path is "-") and returns the normalized tree.
 func Load(path string, opts Options) (*Result, error) {
-	l := &loader{opts: opts, visiting: map[string]bool{}}
+	l := &loader{opts: opts, visiting: map[string]bool{}, cache: map[string][]config.IDirective{}}
 
 	var (
 		src      string
@@ -93,6 +103,8 @@ func Load(path string, opts Options) (*Result, error) {
 	}
 
 	l.sandbox = baseDir
+	l.totalBytes = len(src)
+	l.fileCount = 1
 
 	root := &model.Node{Name: "", File: dispPath}
 	dirs, err := parseString(src)
@@ -101,11 +113,12 @@ func Load(path string, opts Options) (*Result, error) {
 	}
 	if absSelf != "" {
 		l.visiting[absSelf] = true
+		l.cache[absSelf] = dirs
 	}
 	root.Children = l.build(dirs, root, dispPath, baseDir, 0)
 
 	sort.Strings(l.notes)
-	return &Result{Path: dispPath, Root: root, Notes: dedup(l.notes)}, nil
+	return &Result{Path: dispPath, Root: root, Notes: dedup(l.notes), FilesRead: l.fileCount}, nil
 }
 
 func (l *loader) build(dirs []config.IDirective, parent *model.Node, curFile, curDir string, depth int) []*model.Node {
@@ -180,21 +193,31 @@ func (l *loader) expandInclude(d config.IDirective, parent *model.Node, curFile,
 			l.note("include %q skipped: include cycle", model.Clean(m))
 			continue
 		}
-		if l.fileCount >= maxTotalFiles {
-			l.note("include processing stopped: max file count (%d) reached", maxTotalFiles)
-			break
-		}
 
-		src, err := readCapped(abs)
-		if err != nil {
-			l.note("include %q skipped: %v", model.Clean(m), err)
-			continue
-		}
-		l.fileCount++
-		dirs, err := parseString(src)
-		if err != nil {
-			l.note("include %q skipped: parse error: %v", model.Clean(m), err)
-			continue
+		dirs, cached := l.cache[abs]
+		if !cached {
+			if l.fileCount >= maxTotalFiles {
+				l.note("include processing stopped: max file count (%d) reached", maxTotalFiles)
+				break
+			}
+			src, err := readCapped(abs)
+			if err != nil {
+				l.note("include %q skipped: %v", model.Clean(m), err)
+				continue
+			}
+			if l.totalBytes+len(src) > maxTotalBytes {
+				l.note("include processing stopped: total read budget (%d bytes) exceeded", maxTotalBytes)
+				break
+			}
+			l.totalBytes += len(src)
+			l.fileCount++
+			parsed, err := parseString(src)
+			if err != nil {
+				l.note("include %q skipped: parse error: %v", model.Clean(m), err)
+				continue
+			}
+			dirs = parsed
+			l.cache[abs] = dirs
 		}
 
 		disp := displayPath(abs)

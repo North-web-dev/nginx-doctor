@@ -63,7 +63,7 @@ func main() {
 func run(args []string, stdout, stderr io.Writer, interactive bool) int {
 	cfg, showHelp, showVersion, err := parseArgs(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n\n", err)
+		errln(stderr, err)
 		fmt.Fprintf(stderr, usage, version)
 		return 2
 	}
@@ -80,7 +80,7 @@ func run(args []string, stdout, stderr io.Writer, interactive bool) int {
 	if path == "" {
 		p, derr := discover()
 		if derr != nil {
-			fmt.Fprintf(stderr, "error: %v\n", derr)
+			errln(stderr, derr)
 			return 2
 		}
 		path = p
@@ -91,7 +91,7 @@ func run(args []string, stdout, stderr io.Writer, interactive bool) int {
 		AllowExternalIncludes: cfg.allowExt,
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		errln(stderr, err)
 		return 2
 	}
 
@@ -100,7 +100,7 @@ func run(args []string, stdout, stderr io.Writer, interactive bool) int {
 
 	if cfg.json {
 		if err := rep.WriteJSON(stdout); err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
+			errln(stderr, err)
 			return 2
 		}
 	} else {
@@ -250,6 +250,13 @@ func writeFixPreview(w io.Writer, findings []model.Finding) {
 	for _, fx := range fixes {
 		fmt.Fprintf(w, "  %s\n", fx)
 	}
+}
+
+// errln prints an error with control characters stripped, so config-derived
+// text in an error message (paths, parser output) cannot inject terminal
+// escapes.
+func errln(w io.Writer, err error) {
+	fmt.Fprintf(w, "error: %s\n", model.Clean(err.Error()))
 }
 
 func isTerminal(f *os.File) bool {

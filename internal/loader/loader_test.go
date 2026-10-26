@@ -118,6 +118,69 @@ func TestMissingTopFileIsError(t *testing.T) {
 	}
 }
 
+func TestIncludedFileReadOnce(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "snippet.conf"),
+		[]byte("server { listen 80; server_name a.test; root /srv; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	b.WriteString("http {\n")
+	for i := 0; i < 50; i++ {
+		b.WriteString("  include snippet.conf;\n")
+	}
+	b.WriteString("}\n")
+	top := filepath.Join(dir, "nginx.conf")
+	if err := os.WriteFile(top, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := Load(top, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// top file + the one unique snippet = 2 reads, even though included 50x.
+	if r.FilesRead != 2 {
+		t.Fatalf("expected 2 files read (top + one cached snippet), got %d", r.FilesRead)
+	}
+	h := httpOf(t, r)
+	if got := len(h.Dir("server")); got != 50 {
+		t.Fatalf("expected 50 spliced servers, got %d", got)
+	}
+}
+
+func TestTotalByteBudget(t *testing.T) {
+	old := maxTotalBytes
+	defer func() { maxTotalBytes = old }()
+	maxTotalBytes = 4096 // tiny budget
+
+	dir := t.TempDir()
+	payload := "server { listen 80; server_name b.test; }\n" + strings.Repeat("# pad\n", 400)
+	for _, n := range []string{"a.conf", "b.conf", "c.conf"} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte(payload), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	top := filepath.Join(dir, "nginx.conf")
+	if err := os.WriteFile(top, []byte("http {\n include a.conf;\n include b.conf;\n include c.conf;\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := Load(top, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var budgetNote bool
+	for _, n := range r.Notes {
+		if strings.Contains(n, "total read budget") {
+			budgetNote = true
+		}
+	}
+	if !budgetNote {
+		t.Fatalf("expected a total-read-budget note, got %v", r.Notes)
+	}
+}
+
 func TestFileSizeCap(t *testing.T) {
 	dir := t.TempDir()
 	big := filepath.Join(dir, "big.conf")

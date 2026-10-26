@@ -73,6 +73,19 @@ func TestOnlyAndSeverityParse(t *testing.T) {
 	}
 }
 
+func TestErrorOutputSanitized(t *testing.T) {
+	var out, errb bytes.Buffer
+	// A path carrying an ESC byte reaches the error message; it must be
+	// stripped before printing to stderr.
+	code := run([]string{"/nonexistent\x1b[31mHACK.conf"}, &out, &errb, false)
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d", code)
+	}
+	if bytes.ContainsRune(errb.Bytes(), 0x1b) {
+		t.Fatalf("error output contains ESC byte: %q", errb.String())
+	}
+}
+
 func TestHelp(t *testing.T) {
 	var out, errb bytes.Buffer
 	code := run([]string{"--help"}, &out, &errb, false)
