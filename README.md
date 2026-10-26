@@ -32,10 +32,11 @@ go install github.com/North-web-dev/nginx-doctor/cmd/nginx-doctor@latest
 
 Or download a prebuilt binary for Linux, macOS, or Windows (amd64 + arm64) from the [releases page](https://github.com/North-web-dev/nginx-doctor/releases), verify it against `checksums.txt`, and drop it on your `PATH`.
 
-Docker (distroless, static, non-root):
+Docker — build the distroless, static, non-root image from source and lint your config read-only:
 
 ```
-docker run --rm -v /etc/nginx:/etc/nginx:ro ghcr.io/north-web-dev/nginx-doctor /etc/nginx/nginx.conf
+docker build -t nginx-doctor .
+docker run --rm -v /etc/nginx:/etc/nginx:ro nginx-doctor /etc/nginx/nginx.conf
 ```
 
 ## Usage
