@@ -1,5 +1,7 @@
 # nginx-doctor
 
+[![Release](https://img.shields.io/github/v/release/North-web-dev/nginx-doctor?sort=semver)](https://github.com/North-web-dev/nginx-doctor/releases) [![Go Reference](https://pkg.go.dev/badge/github.com/North-web-dev/nginx-doctor.svg)](https://pkg.go.dev/github.com/North-web-dev/nginx-doctor) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) ![Go](https://img.shields.io/github/go-mod/go-version/North-web-dev/nginx-doctor)
+
 Lint your nginx config for security, performance, and correctness mistakes — and get the exact fix for each.
 
 `nginx-doctor` is a zero-config Go binary. Point it at an `nginx.conf` (or pipe one in) and it parses the config — resolving `include` directives — and prints graded `PASS` / `WARN` / `FAIL` findings grouped by server and location, each with a one-line fix and a final summary grade.
