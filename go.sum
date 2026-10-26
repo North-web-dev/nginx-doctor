@@ -1,0 +1,12 @@
+github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
+github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
+github.com/imega/luaformatter v0.0.0-20211025140405-86b0a68d6bef h1:RC993DdTIHNItsyLj79fgZNLzrf9tBN0GR6W5ZPms6s=
+github.com/imega/luaformatter v0.0.0-20211025140405-86b0a68d6bef/go.mod h1:i2XCfvmO94HrEOQWllihhtPrkvNfuB2R2p/o6+OVnRU=
+github.com/timtadh/data-structures v0.5.3 h1:F2tEjoG9qWIyUjbvXVgJqEOGJPMIiYn7U5W5mE+i/vQ=
+github.com/timtadh/data-structures v0.5.3/go.mod h1:9R4XODhJ8JdWFEI8P/HJKqxuJctfBQw6fDibMQny2oU=
+github.com/timtadh/lexmachine v0.2.2 h1:g55RnjdYazm5wnKv59pwFcBJHOyvTPfDEoz21s4PHmY=
+github.com/timtadh/lexmachine v0.2.2/go.mod h1:GBJvD5OAfRn/gnp92zb9KTgHLB7akKyxmVivoYCcjQI=
+github.com/tufanbarisyildirim/gonginx v0.0.0-20260220081509-8e17ce617db3 h1:ClWHRIz18WRVT3RD9y9uTwEWU9eEi+VYFEIumg05FLk=
+github.com/tufanbarisyildirim/gonginx v0.0.0-20260220081509-8e17ce617db3/go.mod h1:ALbEe81QPWOZjDKCKNWodG2iqCMtregG8+ebQgjx2+4=
+gotest.tools/v3 v3.5.1 h1:EENdUnS3pdur5nybKYIh2Vfgc8IUNBjxDPSjtiJcOzU=
+gotest.tools/v3 v3.5.1/go.mod h1:isy3WKz7GK6uNw/sbHzfKBLvlvXwUyV06n6brMxxopU=
